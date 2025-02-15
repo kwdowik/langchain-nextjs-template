@@ -4,7 +4,13 @@ import { cn } from "@/utils/cn";
 import { ChevronDown, ChevronUp } from "lucide-react";
 
 export function IntermediateStep(props: { message: Message }) {
-  const parsedInput = JSON.parse(props.message.content);
+  let parsedInput;
+  try {
+    parsedInput = JSON.parse(props.message.content);
+  } catch (e) {
+    console.error("Failed to parse message content", e);
+    return null;
+  }
   const action = parsedInput.action;
   const observation = parsedInput.observation;
   const [expanded, setExpanded] = useState(false);

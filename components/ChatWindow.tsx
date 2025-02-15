@@ -2,10 +2,11 @@
 
 import { type Message } from "ai";
 import { useChat } from "ai/react";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import type { FormEvent, ReactNode } from "react";
 import { toast } from "sonner";
 import { StickToBottom, useStickToBottomContext } from "use-stick-to-bottom";
+import { v4 as uuidv4 } from "uuid";
 
 import { ChatMessageBubble } from "@/components/ChatMessageBubble";
 import { IntermediateStep } from "./IntermediateStep";
@@ -33,7 +34,7 @@ function ChatMessages(props: {
   return (
     <div className="flex flex-col max-w-[768px] mx-auto pb-12 w-full">
       {props.messages.map((m, i) => {
-        if (m.role === "system") {
+        if (m.role === 'tool') {
           return <IntermediateStep key={m.id} message={m} />;
         }
 
@@ -147,15 +148,21 @@ export function ChatWindow(props: {
   const [showIntermediateSteps, setShowIntermediateSteps] = useState(
     !!props.showIntermediateStepsToggle,
   );
-  const [intermediateStepsLoading, setIntermediateStepsLoading] =
-    useState(false);
+  const [intermediateStepsLoading, setIntermediateStepsLoading] = useState(false);
+  const [sourcesForMessages, setSourcesForMessages] = useState<Record<string, any>>({});
+  const [sessionId, setSessionId] = useState<string>("");
 
-  const [sourcesForMessages, setSourcesForMessages] = useState<
-    Record<string, any>
-  >({});
+  useEffect(() => {
+    let storedSessionId = localStorage.getItem("sessionId");
+    if (!storedSessionId) {
+      storedSessionId = uuidv4();
+      localStorage.setItem("sessionId", storedSessionId);
+    }
+    setSessionId(storedSessionId);
+  }, []);
 
   const chat = useChat({
-    api: props.endpoint,
+    api: `http://127.0.0.1:8000/${props.endpoint}`,
     onResponse(response) {
       const sourcesHeader = response.headers.get("x-sources");
       const sources = sourcesHeader
@@ -164,101 +171,87 @@ export function ChatWindow(props: {
 
       const messageIndexHeader = response.headers.get("x-message-index");
       if (sources.length && messageIndexHeader !== null) {
-        setSourcesForMessages({
-          ...sourcesForMessages,
+        setSourcesForMessages((prev) => ({
+          ...prev,
           [messageIndexHeader]: sources,
-        });
+        }));
       }
     },
-    streamMode: "text",
-    onError: (e) =>
-      toast.error(`Error while processing your request`, {
-        description: e.message,
-      }),
   });
 
   async function sendMessage(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
     if (chat.isLoading || intermediateStepsLoading) return;
 
-    if (!showIntermediateSteps) {
-      chat.handleSubmit(e);
-      return;
-    }
-
-    // Some extra work to show intermediate steps properly
-    setIntermediateStepsLoading(true);
-
-    chat.setInput("");
     const messagesWithUserReply = chat.messages.concat({
       id: chat.messages.length.toString(),
       content: chat.input,
       role: "user",
     });
+
+    chat.setInput("");
     chat.setMessages(messagesWithUserReply);
 
-    const response = await fetch(props.endpoint, {
+    const response = await fetch(`http://127.0.0.1:8000/${props.endpoint}`, {
       method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
       body: JSON.stringify({
+        session_id: sessionId,
         messages: messagesWithUserReply,
-        show_intermediate_steps: true,
+        show_intermediate_steps: showIntermediateSteps,
+        stream_response: true,
       }),
     });
-    const json = await response.json();
-    setIntermediateStepsLoading(false);
 
-    if (!response.ok) {
-      toast.error(`Error while processing your request`, {
-        description: json.error,
-      });
+    if (!response.body) {
+      toast.error("No response body");
       return;
     }
 
-    const responseMessages: Message[] = json.messages;
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder("utf-8");
 
-    // Represent intermediate steps as system messages for display purposes
-    // TODO: Add proper support for tool messages
-    const toolCallMessages = responseMessages.filter(
-      (responseMessage: Message) => {
-        return (
-          (responseMessage.role === "assistant" &&
-            !!responseMessage.tool_calls?.length) ||
-          responseMessage.role === "tool"
-        );
-      },
-    );
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
 
-    const intermediateStepMessages = [];
-    for (let i = 0; i < toolCallMessages.length; i += 2) {
-      const aiMessage = toolCallMessages[i];
-      const toolMessage = toolCallMessages[i + 1];
-      intermediateStepMessages.push({
-        id: (messagesWithUserReply.length + i / 2).toString(),
-        role: "system" as const,
-        content: JSON.stringify({
-          action: aiMessage.tool_calls?.[0],
-          observation: toolMessage.content,
-        }),
-      });
+      const chunk = decoder.decode(value, { stream: true });
+      let json;
+      try {
+        json = JSON.parse(chunk);
+      } catch (error) {
+        console.error("Failed to parse chunk as JSON", error);
+        continue;
+      }
+
+      console.log({ json });
+      if (json.messages[0].role === 'tool') {
+        chat.setMessages((prevMessages) => [
+          ...prevMessages,
+          {
+            id: prevMessages.length.toString(),
+            role: 'tool',
+            content: json.messages[0].content,
+          },
+        ]);
+      } else {
+        chat.setMessages((prevMessages) => [
+          ...prevMessages,
+          {
+            id: prevMessages.length.toString(),
+            role: json.messages[0].role,
+            content: json.messages[0].content,
+          },
+        ]);
+      }
     }
-    const newMessages = messagesWithUserReply;
-    for (const message of intermediateStepMessages) {
-      newMessages.push(message);
-      chat.setMessages([...newMessages]);
-      await new Promise((resolve) =>
-        setTimeout(resolve, 1000 + Math.random() * 1000),
-      );
-    }
 
-    chat.setMessages([
-      ...newMessages,
-      {
-        id: newMessages.length.toString(),
-        content: responseMessages[responseMessages.length - 1].content,
-        role: "assistant",
-      },
-    ]);
+    setIntermediateStepsLoading(false);
   }
+
+  console.log(chat.messages);
 
   return (
     <StickToBottom>
@@ -282,7 +275,7 @@ export function ChatWindow(props: {
             <ScrollToBottom className="absolute bottom-full left-1/2 -translate-x-1/2 mb-4" />
             <ChatInput
               value={chat.input}
-              onChange={chat.handleInputChange}
+              onChange={(e) => chat.setInput(e.target.value)}
               onSubmit={sendMessage}
               loading={chat.isLoading || intermediateStepsLoading}
               placeholder={

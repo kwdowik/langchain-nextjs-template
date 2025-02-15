@@ -1,11 +1,15 @@
 import { cn } from "@/utils/cn";
 import type { Message } from "ai/react";
+import { MDXProvider } from '@mdx-js/react';
+import React from 'react';
 
 export function ChatMessageBubble(props: {
   message: Message;
   aiEmoji?: string;
   sources: any[];
 }) {
+  const isMDX = props.message.content.startsWith('---mdx---');
+
   return (
     <div
       className={cn(
@@ -23,7 +27,15 @@ export function ChatMessageBubble(props: {
       )}
 
       <div className="whitespace-pre-wrap flex flex-col">
-        <span>{props.message.content}</span>
+        {isMDX ? (
+          <MDXProvider>
+            <div className="mdx-content">
+              {props.message.content.replace('---mdx---', '')}
+            </div>
+          </MDXProvider>
+        ) : (
+          <span>{props.message.content}</span>
+        )}
 
         {props.sources && props.sources.length ? (
           <>
