@@ -11,32 +11,6 @@ import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# class GitHubCLIBaseTool(BaseTool):
-#     """Base class for GitHub CLI tools."""
-    
-#     def _run_gh_command(self, command: str) -> Dict[Any, Any]:
-#         """Run a GitHub CLI command and return the JSON output."""
-#         try:
-#             # Add 'gh' prefix and ensure JSON output
-#             if not command.startswith('gh '):
-#                 command = f'gh {command}'
-            
-#             result = subprocess.run(
-#                 command,
-#                 shell=True,
-#                 capture_output=True,
-#                 text=True
-#             )
-            
-#             if result.returncode != 0:
-#                 raise Exception(f"Command failed: {result.stderr}")
-                
-#             return json.loads(result.stdout)
-#         except json.JSONDecodeError:
-#             raise Exception(f"Failed to parse JSON output: {result.stdout}")
-#         except Exception as e:
-#             raise Exception(f"Error running command: {str(e)}")
-
 class ListPullRequestsArgs(BaseModel):
     author: str = Field(description="The GitHub username of the PR author")
     repo: str = Field(default="frontend", description="The repository name (default: frontend)")
@@ -82,7 +56,7 @@ class ListPullRequests(BaseTool):
         """Lists pull requests from a specific author."""
         logger.info(f"ListPullRequests tool called with args: author={author}, repo={repo}, state={state}, limit={limit}")
         try:
-            # Request more fields in the JSON output for better verification
+            # Request fields needed for PR complexity analysis
             command = f'gh pr list -R Chili-Piper/{repo} --author {author} --state {state} --limit {limit} --json number,title,state,createdAt,mergedAt,url,author'
             logger.info(f"Executing GitHub CLI command: {command}")
             
@@ -179,46 +153,131 @@ class GetPRDetails(BaseTool):
 
 class GetUserContributions(BaseTool):
     name: str = "get_user_contributions"
-    description: str = "Gets contribution statistics for a user in a Chili-Piper repository for a specific time period"
+    description: str = "Gets comprehensive contribution statistics (commits and PRs) for a user in a Chili-Piper repository for a specific time period"
     args_schema: type[GetUserContributionsArgs] = GetUserContributionsArgs
+    
+    def _validate_github_response(self, result: subprocess.CompletedProcess, context: str) -> tuple[bool, Optional[Any], Optional[str]]:
+        """Validates GitHub CLI response and returns (is_valid, parsed_data, error_message)"""
+        if result.returncode != 0:
+            return False, None, f"GitHub CLI {context} failed: {result.stderr.strip()}"
+            
+        try:
+            if not result.stdout.strip():
+                return False, None, f"No {context} data returned"
+                
+            data = json.loads(result.stdout)
+            if not isinstance(data, (list, dict)):
+                return False, None, f"Invalid {context} data format"
+                
+            return True, data, None
+        except json.JSONDecodeError:
+            return False, None, f"Failed to parse {context} JSON data"
     
     def _run(self, author: str, repo: str, since: str, until: str) -> str:
         try:
-            since_date = datetime.strptime(since, "%Y-%m-%d").isoformat()
-            until_date = datetime.strptime(until, "%Y-%m-%d").isoformat()
-            
-            command = f'gh api -H "Accept: application/vnd.github+json" /repos/Chili-Piper/{repo}/commits?author={author}&since={since_date}&until={until_date}'
-            result = subprocess.run(command, shell=True, capture_output=True, text=True)
-            logger.info(f"Executing GitHub CLI command: {command}")
-            
-            if result.returncode != 0:
-                return json.dumps({
-                    "error": f"Failed to get contributions: {result.stderr.strip()}",
-                    "command": command
-                })
-            
+            # Validate date formats first
             try:
-                json_data = json.loads(result.stdout)
+                since_date = datetime.strptime(since, "%Y-%m-%d").isoformat()
+                until_date = datetime.strptime(until, "%Y-%m-%d").isoformat()
+            except ValueError as e:
                 return json.dumps({
-                    "success": True,
-                    "data": json_data,
-                    "count": len(json_data)
+                    "error": "Invalid date format. Please use YYYY-MM-DD format.",
+                    "details": str(e)
                 })
-            except json.JSONDecodeError:
-                return json.dumps({
-                    "error": "Failed to parse GitHub API output as JSON",
-                    "raw_output": result.stdout
-                })
+
+            # Initialize response structure
+            response = {
+                "success": False,
+                "date_range": {"since": since, "until": until},
+                "commits": {"total": 0, "sample": [], "error": None},
+                "pull_requests": {
+                    "total": 0,
+                    "sample": [],
+                    "states": {"open": 0, "closed": 0, "merged": 0},
+                    "error": None
+                }
+            }
+
+            # Get commits
+            commits_command = f'gh api -H "Accept: application/vnd.github+json" /repos/Chili-Piper/{repo}/commits?author={author}&since={since_date}&until={until_date}'
+            commits_result = subprocess.run(commits_command, shell=True, capture_output=True, text=True)
+            logger.info(f"Executing GitHub CLI command for commits: {commits_command}")
+            
+            is_valid, commits_data, error = self._validate_github_response(commits_result, "commits")
+            if is_valid and commits_data:
+                response["commits"]["total"] = len(commits_data)
+                for commit in commits_data[:5]:  # Only process first 5 commits
+                    if not isinstance(commit, dict):
+                        continue
+                        
+                    commit_data = commit.get("commit", {})
+                    if not isinstance(commit_data, dict):
+                        continue
+                        
+                    commit_info = {
+                        "sha": commit.get("sha", "")[:8] if commit.get("sha") else "unknown",
+                        "date": commit_data.get("author", {}).get("date", "unknown"),
+                        "message": (commit_data.get("message", "").split("\n")[0] 
+                                  if commit_data.get("message") else "No message")
+                    }
+                    response["commits"]["sample"].append(commit_info)
+            else:
+                response["commits"]["error"] = error
+
+            # Get PRs
+            prs_command = f'gh pr list -R Chili-Piper/{repo} --author {author} --json number,title,state,createdAt,mergedAt,url --search "created:{since}..{until}"'
+            prs_result = subprocess.run(prs_command, shell=True, capture_output=True, text=True)
+            logger.info(f"Executing GitHub CLI command for PRs: {prs_command}")
+            
+            is_valid, prs_data, error = self._validate_github_response(prs_result, "pull requests")
+            if is_valid and prs_data:
+                response["pull_requests"]["total"] = len(prs_data)
                 
-        except ValueError as e:
-            return json.dumps({
-                "error": "Dates must be in YYYY-MM-DD format",
-                "details": str(e)
-            })
+                # Count PR states with validation
+                for pr in prs_data:
+                    if not isinstance(pr, dict):
+                        continue
+                        
+                    state = pr.get("state", "").lower()
+                    if state == "open":
+                        response["pull_requests"]["states"]["open"] += 1
+                    elif state == "closed":
+                        if pr.get("mergedAt"):
+                            response["pull_requests"]["states"]["merged"] += 1
+                        else:
+                            response["pull_requests"]["states"]["closed"] += 1
+                
+                # Process PR samples with validation
+                for pr in prs_data[:5]:  # Only process first 5 PRs
+                    if not isinstance(pr, dict):
+                        continue
+                        
+                    pr_info = {
+                        "number": pr.get("number", "unknown"),
+                        "title": pr.get("title", "No title"),
+                        "state": pr.get("state", "unknown"),
+                        "created_at": pr.get("createdAt", "unknown"),
+                        "merged_at": pr.get("mergedAt"),
+                        "url": pr.get("url", "unknown")
+                    }
+                    response["pull_requests"]["sample"].append(pr_info)
+            else:
+                response["pull_requests"]["error"] = error
+
+            # Set success based on whether we got any valid data
+            response["success"] = (
+                response["commits"]["total"] > 0 or 
+                response["pull_requests"]["total"] > 0 or 
+                (response["commits"]["error"] is None and response["pull_requests"]["error"] is None)
+            )
+
+            return json.dumps(response, indent=2)
+                
         except Exception as e:
+            logger.error(f"Error in GetUserContributions: {str(e)}", exc_info=True)
             return json.dumps({
-                "error": f"Error getting contributions: {str(e)}",
-                "command": command
+                "success": False,
+                "error": f"Unexpected error: {str(e)}"
             })
 
 class AnalyzePRComplexity(BaseTool):

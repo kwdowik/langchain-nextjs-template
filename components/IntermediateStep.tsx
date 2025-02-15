@@ -1,66 +1,37 @@
-import { useState } from "react";
-import type { Message } from "ai/react";
-import { cn } from "@/utils/cn";
-import { ChevronDown, ChevronUp } from "lucide-react";
+import { Message } from "ai";
+import { Code } from "./ui/code";
 
-export function IntermediateStep(props: { message: Message }) {
-  let parsedInput;
+export function IntermediateStep({ message }: { message: Message }) {
   try {
-    parsedInput = JSON.parse(props.message.content);
-  } catch (e) {
-    console.error("Failed to parse message content", e);
-    return null;
-  }
-  const action = parsedInput.action;
-  const observation = parsedInput.observation;
-  const [expanded, setExpanded] = useState(false);
-  return (
-    <div className="mr-auto bg-secondary border border-input rounded p-3 max-w-[80%] mb-8 whitespace-pre-wrap flex flex-col">
-      <button
-        type="button"
-        className={cn(
-          "text-left flex items-center gap-1",
-          expanded && "w-full",
-        )}
-        onClick={(e) => setExpanded(!expanded)}
-      >
-        <span>
-          Step: <strong className="font-mono">{action.name}</strong>
-        </span>
-        <span className={cn(expanded && "hidden")}>
-          <ChevronDown className="w-5 h-5" />
-        </span>
-        <span className={cn(!expanded && "hidden")}>
-          <ChevronUp className="w-5 h-5" />
-        </span>
-      </button>
-      <div
-        className={cn(
-          "overflow-hidden max-h-[0px] transition-[max-height] ease-in-out text-sm",
-          expanded && "max-h-[360px]",
-        )}
-      >
-        <div
-          className={cn(
-            "rounded",
-            expanded ? "max-w-full" : "transition-[max-width] delay-100",
-          )}
-        >
-          Input:{" "}
-          <code className="max-h-[100px] overflow-auto">
-            {JSON.stringify(action.args)}
-          </code>
-        </div>
-        <div
-          className={cn(
-            "rounded",
-            expanded ? "max-w-full" : "transition-[max-width] delay-100",
-          )}
-        >
-          Output:{" "}
-          <code className="max-h-[260px] overflow-auto">{observation}</code>
+    const toolData = JSON.parse(message.content);
+    return (
+      <div className="mx-auto mb-8 max-w-[768px]">
+        <div className="rounded-lg border bg-muted p-4">
+          <div className="mb-2 flex items-center">
+            <span className="mr-2 text-sm font-semibold">🛠️ Tool Execution:</span>
+            <code className="rounded bg-primary px-1 py-0.5 text-sm">
+              {toolData.tool_name}
+            </code>
+          </div>
+
+          <div className="mb-4">
+            <div className="text-sm font-semibold text-muted-foreground">Input:</div>
+            <Code className="mt-1 text-sm">{JSON.stringify(toolData.tool_input, null, 2)}</Code>
+          </div>
+
+          <div>
+            <div className="text-sm font-semibold text-muted-foreground">Output:</div>
+            <Code className="mt-1 text-sm">
+              {typeof toolData.tool_output === 'string' 
+                ? toolData.tool_output 
+                : JSON.stringify(toolData.tool_output, null, 2)}
+            </Code>
+          </div>
         </div>
       </div>
-    </div>
-  );
+    );
+  } catch (error) {
+    console.error("Error parsing tool data:", error);
+    return null;
+  }
 }
